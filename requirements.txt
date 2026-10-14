@@ -1,0 +1,13 @@
+# Core GUI Framework
+PySide6>=6.5.0
+
+# SMB Server (Impacket SimpleSMBServer)
+impacket==0.13.1
+
+# QR Code Generation & Image Support
+qrcode>=7.4.2
+pillow>=10.0.0
+
+# Testing & Quality Assurance
+pytest>=7.0.0
+pytest-qt>=4.2.0
