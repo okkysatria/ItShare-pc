@@ -70,13 +70,6 @@ class AddShareDialog(QDialog):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
-        close = QToolButton()
-        close.setText("×")
-        close.setToolTip("Tutup")
-        close.setObjectName("setupClose")
-        close.setStyleSheet("border:none; background:transparent; font-size:28px; padding:0 8px;")
-        close.clicked.connect(self.reject)
-        header.addWidget(close, alignment=Qt.AlignmentFlag.AlignTop)
         root.addLayout(header)
 
         scroll = QScrollArea(self)
@@ -364,7 +357,6 @@ class AddShareDialog(QDialog):
             QPushButton#setupLink { border: none; background: transparent; color: #176b49; padding: 0; font-weight: 650; }
             QPushButton#setupLink:hover { text-decoration: underline; }
             QToolButton#advancedToggle { border: none; background: transparent; font-size: 15px; font-weight: 650; text-align: left; }
-            QToolButton#setupClose { border: none; background: transparent; font-size: 28px; padding: 0 8px; }
             QPushButton#durationButton { border: none; border-radius: 10px; padding: 7px 4px; color: #176b49; background: #edf3ef; }
             QPushButton#durationButton:checked { color: #ffffff; background: #176b49; font-weight: 650; }
         """)

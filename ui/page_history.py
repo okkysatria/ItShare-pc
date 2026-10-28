@@ -22,6 +22,7 @@ class PageHistory(QWidget):
         self._current_page = 0
         self._page_size = 20
         self._client_snapshot = None
+        self._transfer_snapshot = None
         self._client_timer = QTimer(self)
         self._client_timer.setInterval(3000)
         self._client_timer.timeout.connect(self._refresh_clients)
@@ -109,6 +110,9 @@ class PageHistory(QWidget):
         if view == "clients":
             self._client_snapshot = None
             self._client_timer.start()
+        elif view == "transfers":
+            self._transfer_snapshot = None
+            self._client_timer.start()
         else:
             self._client_timer.stop()
         has_items = bool(
@@ -189,6 +193,17 @@ class PageHistory(QWidget):
             self._refresh()
 
     def _refresh_clients(self, force: bool = False):
+        if self._view == "transfers":
+            events = self.history_manager.get_transfer_history()
+            snapshot = tuple(
+                (event.get("timestamp"), event.get("direction"), event.get("client"), event.get("share"), event.get("file_name"), event.get("size_bytes"))
+                for event in events
+            )
+            if not force and snapshot == self._transfer_snapshot:
+                return
+            self._transfer_snapshot = snapshot
+            self._refresh()
+            return
         clients = self.smb_manager.get_connected_clients() if self.smb_manager else []
         snapshot = tuple((client["address"], client["connections"]) for client in clients)
         if not force and snapshot == self._client_snapshot:
@@ -289,7 +304,7 @@ class PageHistory(QWidget):
 
     def _add_transfer_item(self, event: dict):
         item = QListWidgetItem()
-        item.setSizeHint(QSize(0, 76))
+        item.setSizeHint(QSize(0, 90))
         self.list_widget.addItem(item)
         row = QFrame()
         row.setStyleSheet("QFrame { background:#ffffff; border:1px solid #dfe8e1; border-radius:12px; }")
@@ -316,6 +331,12 @@ class PageHistory(QWidget):
         subtitle.setStyleSheet("color:#68756e; font-size:11px; border:0;")
         details.addWidget(name)
         details.addWidget(subtitle)
+        relative_path = str(event.get("relative_path") or "")
+        if relative_path and relative_path != name.text():
+            path_label = QLabel(relative_path)
+            path_label.setStyleSheet("color:#68756e; font-size:10px; border:0;")
+            path_label.setToolTip(relative_path)
+            details.addWidget(path_label)
         layout.addLayout(details, 1)
 
         try:

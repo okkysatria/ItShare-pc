@@ -130,14 +130,29 @@ _STOP_REQUEST_FILE = _ACTIVE_SHARE_FILE.with_suffix(".stop")
 _TRANSFER_HISTORY_FILE = Path.home() / ".itshare" / "transfer_history.jsonl"
 _TRANSFER_HISTORY_LOCK = threading.Lock()
 
-def _append_transfer_event(direction: str, file_path: str, byte_count: int, client_ip: str, share_name: str) -> None:
-    """Persist SMB file I/O events from Android without recording credentials."""
+def _append_transfer_event(
+    direction: str,
+    file_path: str,
+    byte_count: int,
+    client_ip: str,
+    share_name: str,
+    share_root: str = "",
+) -> None:
+    """Persist one completed SMB file read/write without storing credentials."""
+    file_name = Path(file_path).name
+    relative_path = file_name
+    if share_root:
+        try:
+            relative_path = os.path.relpath(file_path, share_root).replace(os.sep, "/")
+        except (OSError, ValueError):
+            pass
     event = {
         "direction": direction,
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "client": client_ip,
         "share": share_name,
-        "file_name": Path(file_path).name,
+        "file_name": file_name,
+        "relative_path": relative_path,
         "size_bytes": max(0, int(byte_count)),
     }
     try:
@@ -147,8 +162,37 @@ def _append_transfer_event(direction: str, file_path: str, byte_count: int, clie
     except OSError:
         logger.exception("Could not persist SMB transfer activity")
 
-def _install_transfer_audit(server) -> None:
-    """Observe completed SMB2 file reads/writes and record one event per file handle."""
+
+def _merge_byte_range(ranges: list, start: int, length: int) -> None:
+    if length <= 0:
+        return
+    end = start + length
+    merged = []
+    inserted = False
+    for range_start, range_end in ranges:
+        if range_end < start:
+            merged.append((range_start, range_end))
+        elif end < range_start:
+            if not inserted:
+                merged.append((start, end))
+                inserted = True
+            merged.append((range_start, range_end))
+        else:
+            start = min(start, range_start)
+            end = max(end, range_end)
+    if not inserted:
+        merged.append((start, end))
+    ranges[:] = merged
+
+
+def _covers_file(ranges: list, file_size: int) -> bool:
+    if file_size <= 0:
+        return False
+    return bool(ranges) and ranges[0][0] <= 0 and ranges[0][1] >= file_size
+
+
+def _install_transfer_audit(server, share_roots: dict[str, str]) -> None:
+    """Track actual SMB2 read/write byte ranges and log complete transfers on close."""
     from impacket import smb3structs as smb2
 
     smb_server = server.getServer()
@@ -171,21 +215,24 @@ def _install_transfer_audit(server) -> None:
             opened = data.get("OpenedFiles", {}).get(file_id)
             if not opened or not os.path.isfile(opened.get("FileName", "")):
                 return result
-            access = int(request["DesiredAccess"])
-            is_write = bool(access & (0x2 | 0x40000000 | 0x10000000))
-            is_read = bool(access & (0x1 | 0x80000000 | 0x10000000))
+            share = data.get("ConnectedShares", {}).get(packet["TreeID"], {})
+            share_name = str(share.get("shareName") or "")
+            share_root = share_roots.get(share_name.casefold(), "")
+            file_path = opened["FileName"]
             opened["ItShareAudit"] = {
-                "direction": "upload" if is_write else "download" if is_read else "",
-                "path": opened["FileName"],
-                "size": os.path.getsize(opened["FileName"]),
-                "bytes": 0,
-                "started": time.monotonic(),
+                "path": file_path,
+                "share_root": share_root,
+                "size": os.path.getsize(file_path),
+                "read_bytes": 0,
+                "write_bytes": 0,
+                "read_ranges": [],
+                "write_ranges": [],
                 "client": str(data.get("ClientIP") or ""),
-                "share": str(data.get("ConnectedShares", {}).get(packet["TreeID"], {}).get("shareName") or ""),
+                "share": share_name,
             }
             smb_impl.setConnectionData(conn_id, data)
         except Exception:
-            logger.debug("Unable to initialize SMB transfer audit", exc_info=True)
+            logger.debug("Unable to initialize transfer audit", exc_info=True)
         return result
 
     def get_audit(data, packet, request_type):
@@ -197,17 +244,20 @@ def _install_transfer_audit(server) -> None:
                 if response is not None:
                     file_id = response["FileID"].getData()
             opened = data.get("OpenedFiles", {}).get(file_id)
-            return opened.get("ItShareAudit") if opened else None
+            return (opened.get("ItShareAudit"), request) if opened else (None, request)
         except Exception:
-            return None
+            return None, None
 
     def read(conn_id, smb_impl, packet):
         data = smb_impl.getConnectionData(conn_id)
-        audit = get_audit(data, packet, smb2.SMB2Read)
+        audit, request = get_audit(data, packet, smb2.SMB2Read)
         result = original_read(conn_id, smb_impl, packet)
         try:
             if audit is not None and result[2] == 0 and result[0]:
-                audit["bytes"] += int(result[0][0]["DataLength"])
+                count = int(result[0][0]["DataLength"])
+                offset = int(request["Offset"])
+                audit["read_bytes"] += count
+                _merge_byte_range(audit["read_ranges"], offset, count)
                 smb_impl.setConnectionData(conn_id, data)
         except Exception:
             logger.debug("Unable to update SMB read audit", exc_info=True)
@@ -215,11 +265,14 @@ def _install_transfer_audit(server) -> None:
 
     def write(conn_id, smb_impl, packet):
         data = smb_impl.getConnectionData(conn_id)
-        audit = get_audit(data, packet, smb2.SMB2Write)
+        audit, request = get_audit(data, packet, smb2.SMB2Write)
         result = original_write(conn_id, smb_impl, packet)
         try:
             if audit is not None and result[2] == 0 and result[0]:
-                audit["bytes"] += int(result[0][0]["Count"])
+                count = int(result[0][0]["Count"])
+                offset = int(request["Offset"])
+                audit["write_bytes"] += count
+                _merge_byte_range(audit["write_ranges"], offset, count)
                 smb_impl.setConnectionData(conn_id, data)
         except Exception:
             logger.debug("Unable to update SMB write audit", exc_info=True)
@@ -239,11 +292,17 @@ def _install_transfer_audit(server) -> None:
             audit = None
         result = original_close(conn_id, smb_impl, packet)
         try:
-            is_complete_read = audit and audit["direction"] == "download" and audit["bytes"] >= audit["size"]
-            is_upload = audit and audit["direction"] == "upload" and audit["bytes"] > 0
-            if audit and result[2] == 0 and (is_upload or is_complete_read):
+            if not audit or result[2] != 0:
+                return result
+            if _covers_file(audit["read_ranges"], audit["size"]):
                 _append_transfer_event(
-                    audit["direction"], audit["path"], audit["bytes"], audit["client"], audit["share"]
+                    "download", audit["path"], audit["size"], audit["client"], audit["share"], audit["share_root"]
+                )
+            final_size = os.path.getsize(audit["path"])
+            upload_complete = _covers_file(audit["write_ranges"], final_size)
+            if upload_complete:
+                _append_transfer_event(
+                    "upload", audit["path"], final_size, audit["client"], audit["share"], audit["share_root"]
                 )
         except Exception:
             logger.debug("Unable to finalize SMB transfer audit", exc_info=True)
@@ -265,6 +324,18 @@ def run_detached_service(state_path: str) -> int:
     """Standalone SMB process. It is intentionally independent of the UI."""
     state_file = Path(state_path)
     stop_file = state_file.with_suffix(".stop")
+    execution_state_api = None
+    keep_system_awake = False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            execution_state_api = kernel.SetThreadExecutionState
+            execution_state_api.argtypes = [ctypes.c_uint]
+            execution_state_api.restype = ctypes.c_uint
+            keep_system_awake = bool(execution_state_api(0x80000001))
+        except (AttributeError, OSError):
+            logger.warning("Could not request Windows awake state while the share is active", exc_info=True)
     try:
         with state_file.open("r", encoding="utf-8") as stream:
             state = json.load(stream)
@@ -313,7 +384,10 @@ def run_detached_service(state_path: str) -> int:
 
             server.setNTLMSupport(True)
             server.setKerberosSupport(False)
-            _install_transfer_audit(server)
+            _install_transfer_audit(
+                server,
+                {str(item["share_name"]).casefold(): str(item["folder_path"]) for item in shares},
+            )
 
             errors = []
             def serve():
@@ -382,6 +456,11 @@ def run_detached_service(state_path: str) -> int:
         logger.exception("Detached SMB service failed")
         return 1
     finally:
+        if keep_system_awake and execution_state_api is not None:
+            try:
+                execution_state_api(0x80000000)
+            except OSError:
+                logger.debug("Could not release Windows awake state", exc_info=True)
         try:
             with state_file.open("r", encoding="utf-8") as stream:
                 latest = json.load(stream)

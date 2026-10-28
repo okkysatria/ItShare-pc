@@ -207,7 +207,7 @@ class MainWindow(QMainWindow):
         active_sessions = self.smb_manager.active_sessions
         if active_sessions and self.smb_manager.is_running():
             self.page_folders.restore_active_sessions(active_sessions)
-            self._on_session_started(active_sessions[0])
+            self._on_session_started(active_sessions[0], navigate=False)
 
     def _nav(self, index: int):
         self.stack.setCurrentIndex(index)
@@ -238,14 +238,15 @@ class MainWindow(QMainWindow):
         language = self.history_manager.get_settings().get("language", "en")
         self.status_bar.showMessage(translate(message, language))
 
-    def _on_session_started(self, session: ShareSession):
+    def _on_session_started(self, session: ShareSession, navigate: bool = True):
         self.top_bar.set_status_running(session.host_ip or "127.0.0.1", session.port)
         self._set_status_message(
             f"● Server aktif  smb://{session.host_ip}:{session.port}/{session.share_name}  |  "
             f"User: {session.username}  |  Mode: {'Hanya Baca' if session.read_only else 'Baca-Tulis'}"
         )
         apply_language(self, self.history_manager.get_settings().get("language", "en"))
-        self._nav(0)
+        if navigate:
+            self._nav(0)
 
     def _on_session_stopped(self):
         self.top_bar.set_status_idle()

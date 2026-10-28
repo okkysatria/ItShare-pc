@@ -34,6 +34,7 @@ class HistoryManager:
                 "default_read_only": True,
                 "default_timeout_minutes": 0,
                 "startup_page": 0,
+                "startup_page_user_set": False,
                 "folders_per_page": 8,
                 "theme": "system",
                 "language": "en",
@@ -60,6 +61,9 @@ class HistoryManager:
                     self._data["connection_history"] = connections if isinstance(connections, list) else []
                     if "settings" in loaded and isinstance(loaded["settings"], dict):
                         self._data["settings"].update(loaded["settings"])
+                        loaded_settings = loaded["settings"]
+                        if not loaded_settings.get("startup_page_user_set", False):
+                            self._data["settings"]["startup_page"] = 0
         except Exception as e:
             logger.warning(f"Failed to load history config: {e}")
 
@@ -187,6 +191,8 @@ class HistoryManager:
         return dict(self._data.get("settings", {}))
 
     def update_settings(self, **kwargs) -> None:
+        if "startup_page" in kwargs:
+            kwargs["startup_page_user_set"] = True
         self._data["settings"].update(kwargs)
         self.save()
 
